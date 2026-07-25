@@ -1,0 +1,6 @@
+{
+  "name": "마음 상담소",
+  "description": "지친 당신의 마음을 보듬어주는 감정 안식처 & AI 마음 상담소",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
