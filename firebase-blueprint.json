@@ -1,0 +1,19 @@
+{
+  "entities": {
+    "post": {
+      "title": "Post",
+      "description": "Board post entity",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "content": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "/posts/{postId}": {
+      "schema": { "$ref": "#/entities/post" },
+      "description": "Community posts collection"
+    }
+  }
+}
