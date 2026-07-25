@@ -1,5 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BoardPost, BoardComment } from '../../types';
+import { db } from '../../firebase';
+import {
+  collection,
+  addDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  doc,
+  updateDoc,
+  serverTimestamp,
+} from 'firebase/firestore';
 
 export const BoardView: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string>('전체');
@@ -98,6 +109,49 @@ export const BoardView: React.FC = () => {
     },
   ]);
 
+  // Subscribe to real-time posts from Firestore
+  useEffect(() => {
+    let unsubscribe: () => void = () => {};
+    try {
+      // Query without complex ordering first if index is missing, or fallback safely
+      const q = query(collection(db, 'posts'));
+      unsubscribe = onSnapshot(
+        q,
+        (snapshot) => {
+          if (!snapshot.empty) {
+            const firestorePosts: BoardPost[] = snapshot.docs.map((docSnap) => {
+              const data = docSnap.data();
+              return {
+                id: docSnap.id,
+                title: data.title || '',
+                content: data.content || '',
+                author: data.author || '익명의온기',
+                category: data.category || '위로',
+                date: data.date || '방금 전',
+                likes: typeof data.likes === 'number' ? data.likes : 0,
+                isLiked: !!data.isLiked,
+                moodBadge: data.moodBadge || '🌿 평온함',
+                tags: data.tags || ['#소통'],
+                comments: data.comments || [],
+              };
+            });
+            setPosts(firestorePosts);
+          }
+        },
+        (err) => {
+          console.warn('Firestore subscription error:', err);
+          if (err.code === 'permission-denied' || err.message?.includes('permission')) {
+            console.error('Firestore 규칙 권한 부족:', err);
+          }
+        }
+      );
+    } catch (e) {
+      console.warn('Firestore initialization error:', e);
+    }
+
+    return () => unsubscribe();
+  }, []);
+
   // Form State for Write Post
   const [writeTitle, setWriteTitle] = useState('');
   const [writeContent, setWriteContent] = useState('');
@@ -109,16 +163,20 @@ export const BoardView: React.FC = () => {
   const categories = ['전체', '위로', '고민', '응원', '감사', '자유'];
 
   // Toggle Like Function
-  const handleToggleLike = (postId: string, e?: React.MouseEvent) => {
+  const handleToggleLike = async (postId: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+
+    const targetPost = posts.find((p) => p.id === postId);
+    const nextIsLiked = targetPost ? !targetPost.isLiked : true;
+    const nextLikes = targetPost ? (nextIsLiked ? targetPost.likes + 1 : targetPost.likes - 1) : 1;
+
     setPosts((prev) =>
       prev.map((p) => {
         if (p.id === postId) {
-          const nextIsLiked = !p.isLiked;
           return {
             ...p,
             isLiked: nextIsLiked,
-            likes: nextIsLiked ? p.likes + 1 : p.likes - 1,
+            likes: nextLikes,
           };
         }
         return p;
@@ -126,20 +184,21 @@ export const BoardView: React.FC = () => {
     );
 
     if (selectedPostDetail && selectedPostDetail.id === postId) {
-      setSelectedPostDetail((prev) => {
-        if (!prev) return null;
-        const nextIsLiked = !prev.isLiked;
-        return {
-          ...prev,
-          isLiked: nextIsLiked,
-          likes: nextIsLiked ? prev.likes + 1 : prev.likes - 1,
-        };
+      setSelectedPostDetail((prev) => (prev ? { ...prev, isLiked: nextIsLiked, likes: nextLikes } : null));
+    }
+
+    try {
+      await updateDoc(doc(db, 'posts', postId), {
+        likes: nextLikes,
+        isLiked: nextIsLiked,
       });
+    } catch (err) {
+      console.warn('Firestore updateDoc error:', err);
     }
   };
 
   // Add Comment Function
-  const handleAddComment = (e: React.FormEvent) => {
+  const handleAddComment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCommentText.trim() || !selectedPostDetail) return;
 
@@ -150,7 +209,7 @@ export const BoardView: React.FC = () => {
       date: '방금 전',
     };
 
-    const updatedComments = [...selectedPostDetail.comments, newComment];
+    const updatedComments = [...(selectedPostDetail.comments || []), newComment];
 
     setPosts((prev) =>
       prev.map((p) => (p.id === selectedPostDetail.id ? { ...p, comments: updatedComments } : p))
@@ -162,10 +221,18 @@ export const BoardView: React.FC = () => {
     });
 
     setNewCommentText('');
+
+    try {
+      await updateDoc(doc(db, 'posts', selectedPostDetail.id), {
+        comments: updatedComments,
+      });
+    } catch (err) {
+      console.warn('Firestore add comment error:', err);
+    }
   };
 
   // Submit New Post
-  const handleCreatePost = (e: React.FormEvent) => {
+  const handleCreatePost = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!writeTitle.trim() || !writeContent.trim()) return;
 
@@ -174,8 +241,7 @@ export const BoardView: React.FC = () => {
       .filter((t) => t.trim().length > 0)
       .map((t) => (t.startsWith('#') ? t : `#${t}`));
 
-    const newPost: BoardPost = {
-      id: Date.now().toString(),
+    const postPayload = {
       title: writeTitle,
       content: writeContent,
       author: writeAuthor || '익명의온기',
@@ -186,12 +252,34 @@ export const BoardView: React.FC = () => {
       moodBadge: writeMoodBadge,
       tags: tagList.length > 0 ? tagList : ['#소통'],
       comments: [],
+      createdAt: serverTimestamp(),
     };
 
-    setPosts([newPost, ...posts]);
+    // Immediate local UI update
+    const tempPost: BoardPost = {
+      id: Date.now().toString(),
+      ...postPayload,
+    };
+    setPosts([tempPost, ...posts]);
+
     setWriteTitle('');
     setWriteContent('');
     setShowWriteModal(false);
+
+    try {
+      await addDoc(collection(db, 'posts'), postPayload);
+    } catch (err: any) {
+      console.error('Firestore addDoc error:', err);
+      if (err?.code === 'permission-denied' || err?.message?.includes('permission') || err?.message?.includes('Permission')) {
+        alert(
+          '⚠️ 파이어베이스 데이터베이스 권한 에러!\n\n' +
+          '파이어베이스 콘솔 -> Cloud Firestore -> [규칙] 탭에서 규칙을 아래와 같이 변경한 후 [게시]를 눌러주세요:\n\n' +
+          'allow read, write: if true;'
+        );
+      } else {
+        alert('파이어베이스 저장 실패: ' + (err?.message || '알 수 없는 오류가 발생했습니다.'));
+      }
+    }
   };
 
   // Filter posts
